@@ -35,18 +35,56 @@ class TestCameraGeometry:
             assert float(back_pitch) == pytest.approx(pitch, abs=1e-9)
 
     def test_focal_length_from_fov(self):
+        """端点采样约定下 f = (W-1)/(2·tan(fov/2))，不是 W/(2·tan(fov/2))。"""
         cam = VirtualCamera(fov_x_deg=90.0, width=100, height=50)
-        # fov=90 → f = (W/2)/tan(45°) = W/2
-        assert cam.focal_px == pytest.approx(50.0)
+        assert cam.focal_px == pytest.approx(99.0 / 2.0)
 
     def test_fov_y_is_not_linear_scaling(self):
         """垂直 fov 不是水平 fov 按宽高比的线性缩放 —— 透视投影是非线性的。"""
         cam = VirtualCamera(fov_x_deg=90.0, width=1920, height=1080)
         linear_wrong = cam.fov_x_deg / cam.aspect
         assert cam.fov_y_deg != pytest.approx(linear_wrong, rel=1e-3)
-        # 正确关系：tan(fov_y/2) = tan(fov_x/2) / aspect
-        expected = np.degrees(2 * np.arctan(np.tan(np.radians(90.0) / 2) / cam.aspect))
+        # 端点采样约定：方形像素要求 half_extent 按 (N-1) 等比缩放
+        expected = np.degrees(
+            2 * np.arctan(np.tan(np.radians(90.0) / 2) * (cam.height - 1) / (cam.width - 1))
+        )
         assert cam.fov_y_deg == pytest.approx(float(expected))
+
+    def test_pixel_spacing_is_square(self):
+        """两方向的切平面像素间距必须相等，否则画面会各向异性拉伸。"""
+        cam = VirtualCamera(fov_x_deg=75.0, width=1920, height=1080)
+        dx = 2 * cam.half_extent_x / (cam.width - 1)
+        dy = 2 * cam.half_extent_y / (cam.height - 1)
+        assert dx == pytest.approx(dy, rel=1e-12)
+
+    def test_pixel_spacing_uniform_in_tangent_plane(self):
+        """**切平面坐标**等距 —— 这是端点采样的直接结果。
+
+        注意不能拿 yaw 本身去测均匀性：切平面横坐标 x 等距时，
+        yaw = atan(x) 是**非线性**的，步长必然随位置变化。
+        把它误当成 bug 是透视投影中最常见的误解之一。
+        """
+        cam = VirtualCamera(0, 0, 0, 90.0, 129, 73)
+        rays = cam.pixel_rays()
+        tx = rays[36, :, 0] / rays[36, :, 2]  # 反投影回切平面横坐标
+        steps = np.diff(tx)
+        assert steps.std() < 1e-12, f"切平面步长不均匀，std={steps.std():.2e}"
+
+        # 反过来确认 yaw 确实是非均匀的（证明上面的区分有必要）
+        yaw_row, _ = vec_to_sph(rays[36, :])
+        yaw_steps = np.abs(np.diff(yaw_row))
+        assert yaw_steps.std() > 1e-3
+
+    def test_image_edges_match_fov_boundary(self):
+        """端点采样约定：第 0 列与最后一列应精确对应 ±fov_x/2。"""
+        cam = VirtualCamera(0, 0, 0, 60.0, 101, 57)
+        rays = cam.pixel_rays()
+        from pano_agent.geometry.sphere import great_circle_distance
+
+        d_left = great_circle_distance(
+            *np.array([vec_to_sph(rays[28, 0])]).flatten(), 0.0, 0.0
+        )
+        assert float(d_left) == pytest.approx(30.0, abs=1e-6)
 
     def test_rejects_invalid_fov(self):
         with pytest.raises(ValueError):

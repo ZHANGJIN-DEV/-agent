@@ -97,18 +97,42 @@ class VirtualCamera:
         return self.width / self.height
 
     @property
+    def half_extent_x(self) -> float:
+        """水平半视场在切平面上的半宽 = tan(fov_x / 2)。"""
+        return float(np.tan(np.radians(self.fov_x_deg) / 2.0))
+
+    @property
+    def half_extent_y(self) -> float:
+        """垂直半视场在切平面上的半高。
+
+        注意**不是** half_extent_x / aspect —— 那会得到非方形像素。
+        为保证方形像素，两方向的像素间距必须相等：
+
+            half_extent_x / (W - 1) == half_extent_y / (H - 1)
+
+        端点采样约定下这是唯一正确的换算，也是与 py360convert 对齐的关键。
+        """
+        if self.width <= 1 or self.height <= 1:
+            return self.half_extent_x
+        return self.half_extent_x * (self.height - 1) / (self.width - 1)
+
+    @property
     def focal_px(self) -> float:
-        """焦距（像素）。由水平视场角定义。"""
-        return (self.width / 2.0) / np.tan(np.radians(self.fov_x_deg) / 2.0)
+        """等效焦距（像素）。
+
+        定义使得 pixel_rays 的横坐标换算成立：像素 i 的光线切平面横坐标为
+        (i - (W-1)/2) / f，且 i=0 与 i=W-1 恰好对应 ±tan(fov_x/2)。
+        """
+        return (self.width - 1) / (2.0 * self.half_extent_x)
 
     @property
     def fov_y_deg(self) -> float:
-        """垂直视场角（度），由宽高比导出。
+        """垂直视场角（度）。
 
-        注意：fov_y ≠ fov_x / aspect —— 透视投影下它们不是线性关系。
+        注意：fov_y ≠ fov_x / aspect —— 透视投影下二者不是线性关系。
         这是「景别」映射中容易出错的地方。
         """
-        return float(np.degrees(2.0 * np.arctan(np.tan(np.radians(self.fov_x_deg) / 2.0) / self.aspect)))
+        return float(np.degrees(2.0 * np.arctan(self.half_extent_y)))
 
     # ------------------------------------------------------------ 矩阵
 
@@ -139,18 +163,17 @@ class VirtualCamera:
 
         这是渲染的入口：对每个像素求一条光线方向，再在 ERP 上按方向采样。
         """
-        # 像素中心约定：整数索引即像素中心（与 sphere 模块保持一致）
-        xs = np.arange(self.width, dtype=np.float64)
-        ys = np.arange(self.height, dtype=np.float64)
-        grid_x, grid_y = np.meshgrid(xs, ys)  # (H, W)
-
-        f = self.focal_px
-        cx, cy = (self.width - 1) / 2.0, (self.height - 1) / 2.0
+        # **端点采样约定**：第 0 列与最后一列精确对应 ±tan(fov_x/2)，
+        # 即图像的几何边界就是视场边界。这与 py360convert.e2p 的
+        # `linspace(-x_max, x_max, num=W)` 完全一致，是二者可逐像素对拍的前提。
+        x_rng = np.linspace(-self.half_extent_x, self.half_extent_x, self.width)
+        y_rng = np.linspace(-self.half_extent_y, self.half_extent_y, self.height)
+        grid_x, grid_y = np.meshgrid(x_rng, y_rng)  # (H, W)
 
         # 相机系方向：+Z 为光轴，+X 右，+Y 上。
-        # 图像 y 向下，故此处取负号。
-        x_cam = (grid_x - cx) / f
-        y_cam = -(grid_y - cy) / f
+        # 图像 y 轴向下，故此处对 y 取负。
+        x_cam = grid_x
+        y_cam = -grid_y
         z_cam = np.ones_like(x_cam)
 
         dirs_cam = np.stack([x_cam, y_cam, z_cam], axis=-1)  # (H, W, 3)
@@ -197,10 +220,11 @@ class VirtualCamera:
         front = z > 1e-9
         safe_z = np.where(front, z, 1.0)
 
-        f = self.focal_px
-        cx, cy = (self.width - 1) / 2.0, (self.height - 1) / 2.0
-        x_px = f * v_cam[..., 0] / safe_z + cx
-        y_px = -f * v_cam[..., 1] / safe_z + cy
+        # 逆变换：切平面坐标 → 像素索引（端点采样约定的反函数）
+        tx = v_cam[..., 0] / safe_z
+        ty = v_cam[..., 1] / safe_z
+        x_px = (tx + self.half_extent_x) * (self.width - 1) / (2.0 * self.half_extent_x)
+        y_px = (-ty + self.half_extent_y) * (self.height - 1) / (2.0 * self.half_extent_y)
 
         # 像素 i 覆盖区间 [i-0.5, i+0.5)，因此有效坐标范围是 [-0.5, size-0.5)
         visible = (
