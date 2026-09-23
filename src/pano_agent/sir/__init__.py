@@ -7,6 +7,12 @@
 设计要点见 `schema` 模块的文档字符串。
 """
 
+from .build import (
+    BuildConfig,
+    build_psg,
+    load_numeric_layer,
+    write_numeric_layer,
+)
 from .schema import (
     AudioInfo,
     EventNode,
@@ -19,10 +25,14 @@ from .schema import (
 
 __all__ = [
     "AudioInfo",
+    "BuildConfig",
     "EventNode",
     "PanoramaSceneGraph",
     "ShotNode",
     "TrackNode",
     "TrackStats",
     "VideoMeta",
+    "build_psg",
+    "load_numeric_layer",
+    "write_numeric_layer",
 ]
