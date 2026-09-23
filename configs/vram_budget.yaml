@@ -1,0 +1,143 @@
+# ============================================================
+# 显存预算表 —— 本项目最硬的工程约束
+# ============================================================
+#
+# 背景：RTX 3050 Laptop 标称 4GB 显存，但 Windows WDDM 下桌面合成
+# （DWM）常驻占用约 1.5GB，**实际可用仅约 2.5GB**。
+# 所有模型选型和输入分辨率必须按 2.5GB 设计，而非 4GB。
+#
+# 关键认知：torch.cuda.empty_cache() 并不可靠——PyTorch 的缓存分配器
+# 不保证把显存归还给驱动。**唯一可靠的释放方式是进程退出。**
+# 因此每个中型以上模型跑在独立子进程里，任务完成后进程退出。
+#
+# peak_mb 的数值由 scripts/vram_probe.py 实测得出（首次运行后回填）。
+# ============================================================
+
+hardware:
+  name: "NVIDIA GeForce RTX 3050 Laptop GPU"
+  total_mb: 4096
+  reserved_display_mb: 1500   # 实测 DWM 占用约 1474MB
+  budget_mb: 2500             # 本项目的实际预算
+  compute_capability: "8.6"   # Ampere sm_86，cu126 轮子完全兼容
+
+# ---- 调度策略 ----
+scheduler:
+  # 常驻模型并发时的总显存上限（留给峰值波动）
+  max_concurrent_mb: 2200
+  # 每个子进程启动后等待其显存就绪的超时
+  startup_timeout_s: 120
+  # 单任务超时
+  task_timeout_s: 1800
+  context: "spawn"            # Windows 必须用 spawn；不要用 fork
+
+# ---- OOM 降级链 ----
+fallback:
+  on_oom: cuda_to_cpu         # 见下方 oom_policy
+  oom_policy:
+    - retry_same_device_half_res   # 先尝试降分辨率重试
+    - cuda_to_cpu                  # 再降级到 CPU
+    - skip_module                  # 仍失败则跳过该模块，保证 pipeline 不挂
+  # 设计意图：Demo 永远能跑完，宁可慢/降质，不可中断。
+
+# ---- 模型清单 ----
+models:
+
+  # ===== 常驻（小，可共存）=====
+  yolo11n:
+    module: perception.detect
+    weights: "yolo11n.pt"
+    precision: fp16
+    input_shape: [640, 1280]     # H, W —— ERP 是 2:1，宽扁输入
+    peak_mb: 400
+    can_coexist: true
+    device: cuda
+    fallback_device: cpu
+
+  unet_saliency:
+    module: perception.saliency
+    weights: "runs/saliency/best.pt"   # 自训，W3 产出
+    precision: fp16
+    input_shape: [256, 512]            # 显著图只需低频信息
+    peak_mb: 350
+    can_coexist: true
+    device: cuda
+    fallback_device: cpu
+
+  osnet_x0_25:
+    module: perception.reid
+    weights: "osnet_x0_25_msmt17.pt"
+    precision: fp16
+    input_shape: [128, 256]
+    peak_mb: 180
+    can_coexist: true
+    device: cuda
+    fallback_device: cpu
+
+  clip_vit_b32:
+    module: perception.semantic
+    weights: "ViT-B-32"
+    precision: fp16
+    input_shape: [224, 224]
+    peak_mb: 320
+    can_coexist: true
+    device: cuda
+    fallback_device: cpu
+
+  # ===== 独占（大，必须单独跑，互斥）=====
+  raft_small:
+    module: perception.flow
+    weights: "raft_small"
+    precision: fp16
+    input_shape: [256, 512]
+    peak_mb: 1100
+    can_coexist: false
+    device: cuda
+    fallback_device: cpu
+    note: "4K 输入会爆显存，必须降到 512x256。日常用 OpenCV DIS (CPU) 替代。"
+
+  depth_anything_v2_small:
+    module: perception.depth
+    weights: "depth_anything_v2_vits.pth"
+    precision: fp16
+    input_shape: [518, 518]
+    peak_mb: 1100
+    can_coexist: false
+    device: cuda
+    fallback_device: cpu
+    note: "可选模块，W4 止损点优先砍掉。"
+
+  mobile_sam:
+    module: perception.segment
+    weights: "mobile_sam.pt"
+    precision: fp16
+    input_shape: [1024, 1024]
+    peak_mb: 550
+    can_coexist: false
+    device: cuda
+    fallback_device: cpu
+    note: "仅关键帧使用。加分项，W4 止损点优先砍掉。"
+
+# ---- 纯 CPU 模块（不占显存）----
+cpu_modules:
+  opencv_dis_flow:
+    module: perception.flow
+    note: "主力光流方案，~15ms/帧 @512x256，零显存占用"
+  bytetrack_association:
+    module: perception.track_spherical
+    note: "关联逻辑本身是 CPU 运算"
+  sphere_geometry:
+    module: geometry
+    note: "纯 numpy，零 GPU 依赖——这也是几何层能先写先测的原因"
+
+# ---- 明确跑不了（不要尝试，会浪费时间）----
+infeasible:
+  - name: "任何本地 VLM (Qwen2.5-VL-3B 等)"
+    reason: "3B FP16 需约 6.2GB；INT4 量化后约 2.2GB，但叠加 vision encoder 与 KV cache 必爆，且与感知模型抢显存。→ 走 API。"
+  - name: "扩散模型 (DiT360 / Stable Diffusion)"
+    reason: "单步 attention 即超预算。"
+  - name: "4K 原生推理"
+    reason: "3840x1920x3 FP32 单帧就 88MB，backbone 第一层激活即爆。→ 统一降到 2K 中间格式。"
+  - name: "ViT-L 级别 backbone"
+    reason: "即使只推理也超预算。"
+  - name: "本地微调任何 >0.5B 的模型"
+    reason: "训练激活远大于推理。"

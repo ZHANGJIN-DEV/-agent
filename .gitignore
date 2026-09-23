@@ -1,0 +1,53 @@
+# ---- 密钥（绝不入库）----
+.env
+.env.*
+!.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+build/
+dist/
+
+# ---- 数据与模型权重（体积大，见 docs/datasets.md）----
+/data/
+*.npz
+*.npy
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+
+# ---- 媒体（demo 动图用 .gif 放在 assets/）----
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+# ---- 缓存与日志 ----
+.cache/
+*.log
+logs/
+
+# ---- 测试与构建产物 ----
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# ---- IDE / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,33 @@
+# 统一换行符：仓库内一律 LF，检出时由各平台自行决定。
+# 这避免了 Windows 上 git 反复提示 "LF will be replaced by CRLF"，
+# 也防止在不同系统间协作时产生无意义的整文件 diff。
+* text=auto eol=lf
+
+# 明确指定为二进制的类型，避免被当作文本处理
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.mp4  binary
+*.webm binary
+*.zip  binary
+*.pt   binary
+*.pth  binary
+*.onnx binary
+*.npz  binary
+*.npy  binary
+*.parquet binary
+
+# 模型权重与数据的 diff 无意义
+*.ckpt binary
+*.safetensors binary
+
+# 让 GitHub 识别语言统计
+*.py   text
+*.md   text
+*.toml text
+*.yaml text
+*.yml  text
+
+# 锁文件在合并时自动解决
+requirements.txt merge=union
