@@ -212,27 +212,46 @@ class SphericalBox:
     ) -> SphericalBox:
         """从 ERP 上的像素框构造 BFoV。
 
-        **注意这是一个有损近似**：ERP 上的轴对齐矩形在球面上一般不是
-        BFoV。本方法取四角与中心的角度包围盒，在小框、非极高纬时误差可接受；
-        用作 GT 时建议直接使用数据集提供的球面标注，而不是从像素框反推。
+        **支持跨接缝的框**：x 允许超出 [0, width]。此时框表示的是跨越
+        ERP 左右边界的连续区域 —— 例如 `x1=2018, x2=2068` 表示一个
+        中心在接缝处、宽 50 像素的目标。上游的
+        `perception.detect._merge_seam_fragments` 会产出这种坐标。
+
+        中心 yaw 用**圆统计**（circular mean）计算，而不是对端点取平均：
+        对一个跨接缝的框，端点平均会得到 0°（正好是接缝的对面），
+        而圆均值正确地给出 ±180°。
+
+        注意这仍是一个**有损近似** —— ERP 上的轴对齐矩形在球面上一般不是
+        BFoV。小框、非极高纬时误差可接受；用作 GT 时应直接使用数据集
+        提供的球面标注。
         """
-        xs = np.array([x1, x1, x2, x2, (x1 + x2) / 2.0])
-        ys = np.array([y1, y2, y1, y2, (y1 + y2) / 2.0])
+        # 四个角的球面坐标（不取中心点 —— 跨接缝时"中心"无意义）
+        xs = np.array([x1, x1, x2, x2], dtype=np.float64)
+        ys = np.array([y1, y2, y1, y2], dtype=np.float64)
         yaw, pitch = erp_pixel_to_sph(xs, ys, width, height)
 
-        center_yaw = float(wrap_yaw((x1 + x2) / 2.0 / width * 360.0 - 180.0))
-        center_pitch = float(90.0 - (y1 + y2) / 2.0 / height * 180.0)
+        # 中心 yaw：圆均值。对 [174.8, 183.6] 给出 ≈179.2 而非 0。
+        rad = np.radians(yaw)
+        center_yaw = float(
+            np.degrees(np.arctan2(np.sin(rad).mean(), np.cos(rad).mean()))
+        )
 
-        # 角展度取四角相对中心的偏移范围，比直接用 Δyaw/Δpitch 更稳
+        # 中心 pitch：垂直方向无周期性，直接取中点
+        center_pitch = float(
+            np.clip(90.0 - (y1 + y2) / 2.0 / height * 180.0, -90.0, 90.0)
+        )
+
+        # 角展度：四角相对中心的切平面偏移的最大绝对值
         alpha, beta = angular_offsets(yaw, pitch, center_yaw, center_pitch)
         half_w = float(np.max(np.abs(alpha)))
         half_h = float(np.max(np.abs(beta)))
 
         return cls(
             yaw_deg=center_yaw,
-            pitch_deg=float(np.clip(center_pitch, -90.0, 90.0)),
-            width_deg=max(2.0 * half_w, 1e-6),
-            height_deg=max(2.0 * half_h, 1e-6),
+            pitch_deg=center_pitch,
+            # 理论上不会超过 360°，但极端输入下仍需夹紧以满足不变量
+            width_deg=float(np.clip(2.0 * half_w, 1e-6, 360.0)),
+            height_deg=float(np.clip(2.0 * half_h, 1e-6, 180.0)),
             roll_deg=roll_deg,
         )
 
