@@ -35,13 +35,22 @@ python scripts/vram_probe.py
 |---|---|---|
 | **W1 几何层** | ✅ 完成 | 4 模块 + 165 测试，含与 py360convert 的对拍 |
 | **W3-4 感知层** | ✅ 完成 | 7 模块 + 269 测试 |
-| **W5-6 PSG** | ⬜ **下一步** | 项目技术核心 |
+| **W5-6 PSG** | 🔶 进行中 | schema + build 已完成；时间轴 viewer 待做 |
 | W7-8 Agent 层 | ⬜ 未开始 | LLM 规划 + 轨迹优化 + 渲染 |
 | W9-10 评测 | ⬜ 未开始 | baseline + 消融 |
 | W11 工程化 | ⬜ 未开始 | Docker Demo + 量化 |
 | W12 报告 | ⬜ 未开始 | 技术报告 + 简历文案 |
 
-**最后一次提交**：`f06638b feat(perception): 光流（DIS）与显著性`
+**最后一次提交**：`7531206 feat(sir): PSG 构建`
+
+**测试总数：327 项全通过**（`python -m pytest tests/ -q`）
+
+### W5-6 剩余工作
+
+- [ ] `sir/viewer.py` —— Streamlit 时间轴查看器（拖时间轴看全景帧 +
+      轨道叠加 + 显著性热图）
+- [ ] 接 VLM 生成 `TrackNode.caption`（DeepSeek `deepseek-flash` 支持视觉）
+- [ ] 接真实感知输出（需 torch + YOLO，等环境就绪）
 
 ### 下一步：W5-6 PSG（Panorama Scene Graph）
 
