@@ -205,11 +205,18 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  没有可测试的提供商（全部无密钥或已跳过）")
 
-    print("\n  下一步:")
-    print("    DeepSeek 无视觉模型，VLM 层需要通义或智谱的 key →")
-    print("      通义: https://dashscope.console.aliyun.com/")
-    print("      智谱: https://open.bigmodel.cn/  （glm-4v-flash 免费）")
-    print("    填入 .env 的 DASHSCOPE_API_KEY 或 ZHIPU_API_KEY 后重新运行本脚本\n")
+    if not any(
+        settings.has_vlm_credentials(p) for p in ("deepseek", "qwen", "zhipu")
+    ):
+        print("\n  下一步:")
+        print("    尚未配置任何 VLM 凭据。DeepSeek 已支持图像输入（实测 2026-09），")
+        print("    填入 DEEPSEEK_API_KEY 即可同时覆盖 LLM 与 VLM 两层。")
+        print("    备选平台：")
+        print("      通义: https://dashscope.console.aliyun.com/")
+        print("      智谱: https://open.bigmodel.cn/  （glm-4v-flash 免费）\n")
+    else:
+        print("\n  提示: DeepSeek 的 deepseek-flash 同时支持视觉与推理，" )
+        print("        其 reasoning_content 字段可用于展示 Agent 的决策依据。\n")
 
     return 0 if all(ok for _, ok in results) or not results else 1
 

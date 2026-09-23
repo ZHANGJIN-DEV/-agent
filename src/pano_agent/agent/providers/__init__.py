@@ -44,9 +44,10 @@ def _resolve_spec(kind: ProviderKind, name: ProviderName, settings: Settings) ->
     spec: dict[str, dict] = {
         "deepseek": {
             "base_url": settings.deepseek_base_url,
-            "model": settings.deepseek_model,
+            # 同一平台按用途选不同模型：vlm 走带推理的 flash
+            "model": settings.deepseek_vl_model if kind == "vlm" else settings.deepseek_model,
             "api_key": settings.deepseek_api_key.get_secret_value(),
-            "supports_vision": False,  # DeepSeek 无视觉模型
+            "supports_vision": True,  # 实测 deepseek-flash / deepseek-chat 支持图像输入
         },
         "qwen": {
             "base_url": settings.dashscope_base_url,

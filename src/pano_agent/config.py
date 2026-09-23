@@ -33,12 +33,16 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # ---- LLM（Agent 规划层）----
+    # ---- DeepSeek（同时提供 LLM 与 VLM）----
+    # 实测（2026-09）：deepseek-chat 与 deepseek-flash 均支持图像输入；
+    # deepseek-flash 还会返回 reasoning_content（推理过程）。
+    # deepseek-v4-pro 当前不支持视觉（返回 Unsupported Image）。
     deepseek_api_key: SecretStr = SecretStr("")
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-chat"        # 文本规划
+    deepseek_vl_model: str = "deepseek-flash"    # 视觉理解（带推理）
 
-    # ---- VLM（语义描述 + 反思层）----
+    # ---- 备选 VLM 平台（DeepSeek 已够用时可不配）----
     dashscope_api_key: SecretStr = SecretStr("")
     qwen_vl_model: str = "qwen-vl-plus"
     qwen_llm_model: str = "qwen-plus"
@@ -119,7 +123,7 @@ class Settings(BaseSettings):
     def has_vlm_credentials(self, provider: ProviderName | None = None) -> bool:
         name = provider or self.vlm_provider
         return {
-            "deepseek": False,  # DeepSeek 暂无视觉模型
+            "deepseek": bool(self.deepseek_api_key.get_secret_value()),
             "qwen": bool(self.dashscope_api_key.get_secret_value()),
             "zhipu": bool(self.zhipu_api_key.get_secret_value()),
             "mock": True,
