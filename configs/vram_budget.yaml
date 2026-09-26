@@ -16,8 +16,16 @@
 hardware:
   name: "NVIDIA GeForce RTX 3050 Laptop GPU"
   total_mb: 4096
-  reserved_display_mb: 1500   # 实测 DWM 占用约 1474MB
-  budget_mb: 2500             # 本项目的实际预算
+  reserved_display_mb: 800
+  # ↑ 实测（2026-09-23，torch 装好后）：
+  #   torch.cuda.mem_get_info() 报告可用 3306MB，即非 CUDA 占用约 790MB。
+  #
+  #   注意这与 nvidia-smi 的 "used" 口径不同 —— 后者显示约 1474MB，
+  #   因为它把非 CUDA 的图形/视频占用也算在内。
+  #   对 PyTorch 程序而言，**应以 mem_get_info 为准**。
+  #
+  #   仍留有余量：浏览器、视频播放等会动态抢占显存。
+  budget_mb: 3000             # 保守预算（实测可用 3306MB，留 300MB 缓冲）
   compute_capability: "8.6"   # Ampere sm_86，cu126 轮子完全兼容
 
 # ---- 调度策略 ----

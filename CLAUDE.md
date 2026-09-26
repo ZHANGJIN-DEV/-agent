@@ -35,22 +35,37 @@ python scripts/vram_probe.py
 |---|---|---|
 | **W1 几何层** | ✅ 完成 | 4 模块 + 165 测试，含与 py360convert 的对拍 |
 | **W3-4 感知层** | ✅ 完成 | 7 模块 + 269 测试 |
-| **W5-6 PSG** | 🔶 进行中 | schema + build 已完成；时间轴 viewer 待做 |
+| **W5-6 PSG** | 🔶 进行中 | schema / build / caption 已完成；viewer 与真实数据接入待做 |
 | W7-8 Agent 层 | ⬜ 未开始 | LLM 规划 + 轨迹优化 + 渲染 |
 | W9-10 评测 | ⬜ 未开始 | baseline + 消融 |
 | W11 工程化 | ⬜ 未开始 | Docker Demo + 量化 |
 | W12 报告 | ⬜ 未开始 | 技术报告 + 简历文案 |
 
-**最后一次提交**：`7531206 feat(sir): PSG 构建`
+**最后一次提交**：`c1ce2af feat(sir): VLM 语义描述 + 内容寻址缓存`
 
-**测试总数：327 项全通过**（`python -m pytest tests/ -q`）
+**测试总数：352 项全通过**（`conda run -n pano python -m pytest tests/ -q`）
+
+**环境已就绪**：torch 2.7.1+cu126（CUDA 可用）+ ultralytics 8.3.253
++ 全部依赖。YOLO 权重已下载（yolo11n/s、yolov8n）。
+
+### 显存实测（**远低于早期预估**）
+
+| 模型 | 早期预估 | 实测峰值 | 延迟 |
+|---|---|---|---|
+| yolo11n | 400 MB | **64.7 MiB** | 12.4 ms |
+| yolo11s | 800 MB | **97.2 MiB** | 17.5 ms |
+| yolov8n | 400 MB | **80.5 MiB** | 11.8 ms |
+
+`torch.cuda.mem_get_info()` 报告可用 **3306 MB**（非 nvidia-smi 口径的 2745）。
+预算按 3000MB 计。
 
 ### W5-6 剩余工作
 
 - [ ] `sir/viewer.py` —— Streamlit 时间轴查看器（拖时间轴看全景帧 +
       轨道叠加 + 显著性热图）
-- [ ] 接 VLM 生成 `TrackNode.caption`（DeepSeek `deepseek-flash` 支持视觉）
-- [ ] 接真实感知输出（需 torch + YOLO，等环境就绪）
+- [ ] **用真实数据跑一次端到端**：YOLO 检测 → 球面跟踪 → PSG 构建
+      （`nyc_seg` 的语义 mask 即可验证链路，不必等 11GB 的 RGB 包）
+- [ ] `caption.py` 接真实 VLM 调用（MockProvider 已能跑通通路）
 
 ### 下一步：W5-6 PSG（Panorama Scene Graph）
 
@@ -114,12 +129,21 @@ LLM 只能引用 `track_id`。这是「LLM 输出约束（可校验、可拒绝�
 
 | 项 | 值 | 影响 |
 |---|---|---|
-| GPU | RTX 3050 Laptop 标称 4GB | — |
-| **实际可用显存** | **约 2.5GB** | 桌面合成已占 1.47GB，**所有选型按 2.5GB 算** |
+| GPU | RTX 3050 Laptop 标称 4GB | sm_86 |
+| **CUDA 可用显存** | **3306 MB** | `torch.cuda.mem_get_info()` 口径，预算按 3000MB |
 | 数据目录 | `C:\pano_data` | D 盘仅剩 58G，放不下 4K 全景 |
 | 代码目录 | `D:\pano-agent` | — |
 | ffmpeg | 8.1.1，已编译 nvdec | 4K 可硬解 |
-| **网络** | GitHub / HuggingFace **直连不通** | 用 `hf-mirror.com`；代码托管用 Gitee |
+| **网络** | GitHub / HuggingFace **直连不通且间歇性** | 用 `hf-mirror.com`；代码托管用 Gitee |
+
+> **显存口径的坑**：`nvidia-smi` 的 "used" 显示约 1218-1474MB（含非 CUDA 的
+> 图形占用），据此推算"可用 2.5GB"是**错的**。对 PyTorch 程序应以
+> `torch.cuda.mem_get_info()` 为准 —— 实测 3306MB 可用。
+>
+> 同理，模型显存占用也被高估了：yolo11n 实测峰值仅 **64.7 MiB**（早期预估 400MB）。
+
+> **下载必须能续传**：`nyc_Raw.zip` 下载过程中 curl 进程中断过两次，
+> 都是靠 `curl -C -` 续上的。长时下载一律加 `-C - --retry 5 --retry-all-errors`。
 
 ### 关键认知：`torch.cuda.empty_cache()` 不可靠
 

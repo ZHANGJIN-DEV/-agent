@@ -120,8 +120,10 @@ class TestBudgetFromYaml:
         budget, specs = VramBudget.from_yaml(cfg)
 
         assert budget.total_mb == 4096
-        assert budget.reserved_mb == 1500
-        assert budget.budget_mb == 2596
+        # 实测（torch 装好后）：mem_get_info 报告可用 3306MB，
+        # 故非 CUDA 占用约 800MB —— 与 nvidia-smi 的 1474MB 口径不同
+        assert budget.reserved_mb == 800
+        assert budget.budget_mb == 3296
         # 配置里应包含这些关键模型
         for name in ("yolo11n", "raft_small", "depth_anything_v2_small"):
             assert name in specs, f"{name} 应在预算表中"

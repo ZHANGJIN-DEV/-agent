@@ -236,9 +236,12 @@ class SphericalBox:
             np.degrees(np.arctan2(np.sin(rad).mean(), np.cos(rad).mean()))
         )
 
-        # 中心 pitch：垂直方向无周期性，直接取中点
+        # 中心 pitch：垂直方向无周期性，直接取中点。
+        # **必须 +0.5** —— 遵循「整数索引即像素中心」的全局约定，
+        # 与 `erp_pixel_to_sph` 保持严格一致。漏掉它会让中心纬度偏移半像素，
+        # 虽然肉眼难辨，但在往返测试里会稳定表现为 0.50px 的固定偏差。
         center_pitch = float(
-            np.clip(90.0 - (y1 + y2) / 2.0 / height * 180.0, -90.0, 90.0)
+            np.clip(90.0 - ((y1 + y2) / 2.0 + 0.5) / height * 180.0, -90.0, 90.0)
         )
 
         # 角展度：四角相对中心的切平面偏移的最大绝对值
