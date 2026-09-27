@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PanoDirector · 全景视频自动运镜</title>
+<!--
+  单文件前端 —— 刻意不用 React + Vite 构建流程。
+
+  理由：这个 Demo 的价值在于**能被立刻打开看**。
+  引入构建流程意味着演示前要先 npm install（几分钟）、npm run build，
+  任何一步失败都看不到东西。而本页需要的全部能力（表单、fetch、
+  轮询、<video>）原生 JS 都能覆盖。
+
+  如果日后交互复杂度真的上来了（可拖拽时间轴、多轨道编辑），
+  再迁移到 React 也不迟 —— 那时会带着真实需求去选型。
+
+  风格上保持了克制的暗色主题，与「电影感剪辑工具」的定位一致。
+-->
+<style>
+  :root {
+    --bg: #0d0f13;
+    --panel: #161a21;
+    --panel-2: #1d222b;
+    --border: #2a313d;
+    --text: #e4e8ef;
+    --muted: #8892a4;
+    --accent: #4a9eff;
+    --accent-dim: #2d5f9e;
+    --ok: #3ecf8e;
+    --err: #ff6b6b;
+    --warn: #f5a623;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.6;
+    padding: 32px 24px; min-height: 100vh;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  header { margin-bottom: 28px; }
+  h1 { font-size: 24px; font-weight: 600; letter-spacing: -0.3px; }
+  h1 .sub { color: var(--muted); font-weight: 400; font-size: 15px; margin-left: 10px; }
+  .tagline { color: var(--muted); font-size: 13px; margin-top: 6px; }
+
+  .grid { display: grid; grid-template-columns: 380px 1fr; gap: 20px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px;
+  }
+  .panel h2 {
+    font-size: 13px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 14px;
+  }
+
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  select, input[type=text], textarea {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 9px 11px; font-size: 14px; font-family: inherit;
+    transition: border-color .15s;
+  }
+  select:focus, input:focus, textarea:focus {
+    outline: none; border-color: var(--accent-dim);
+  }
+  textarea { resize: vertical; min-height: 68px; }
+  .field { margin-bottom: 16px; }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+  button {
+    width: 100%; background: var(--accent); color: #fff; border: none;
+    border-radius: 6px; padding: 11px; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: background .15s;
+    font-family: inherit;
+  }
+  button:hover:not(:disabled) { background: #5aa8ff; }
+  button:disabled { background: var(--panel-2); color: var(--muted); cursor: not-allowed; }
+
+  .meta { font-size: 12px; color: var(--muted); margin-top: 8px; text-align: center; }
+
+  /* 进度 */
+  .progress-track {
+    height: 4px; background: var(--panel-2); border-radius: 2px;
+    overflow: hidden; margin: 14px 0 8px;
+  }
+  .progress-bar {
+    height: 100%; background: var(--accent); width: 0%;
+    transition: width .3s ease;
+  }
+  .stage-line {
+    display: flex; justify-content: space-between;
+    font-size: 12px; color: var(--muted);
+  }
+
+  /* 阶段耗时 */
+  .stages { margin-top: 16px; }
+  .stage-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 7px 0; border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .stage-row:last-child { border-bottom: none; }
+  .stage-row .name { color: var(--text); }
+  .stage-row .dur { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .stage-row .detail { color: var(--muted); font-size: 11px; margin-left: 8px; }
+
+  /* 视频区 */
+  .video-area {
+    background: #000; border-radius: 8px; overflow: hidden;
+    aspect-ratio: 16/9; display: flex; align-items: center;
+    justify-content: center; position: relative;
+  }
+  .video-area video { width: 100%; height: 100%; object-fit: contain; }
+  .placeholder { color: #444c5a; font-size: 14px; text-align: center; padding: 40px; }
+  .placeholder .icon { font-size: 32px; display: block; margin-bottom: 10px; opacity: .5; }
+
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge.ok { background: rgba(62,207,142,.15); color: var(--ok); }
+  .badge.err { background: rgba(255,107,107,.15); color: var(--err); }
+  .badge.run { background: rgba(74,158,255,.15); color: var(--accent); }
+  .badge.warn { background: rgba(245,166,35,.15); color: var(--warn); }
+
+  .dsl-box {
+    background: var(--panel-2); border-radius: 6px; padding: 12px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 12px; color: var(--muted); white-space: pre-wrap;
+    max-height: 200px; overflow-y: auto; margin-top: 12px;
+  }
+  .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>PanoDirector<span class="sub">360° 全景视频自动运镜 Agent</span></h1>
+    <p class="tagline">自然语言指令 → 场景理解 → 相机轨迹优化 → 成片</p>
+  </header>
+
+  <div class="grid">
+    <!-- 左侧：控制台 -->
+    <div>
+      <div class="panel">
+        <h2>剪辑任务</h2>
+
+        <div class="field">
+          <label>素材</label>
+          <select id="example"></select>
+        </div>
+
+        <div class="field">
+          <label>剪辑指令</label>
+          <textarea id="instruction">剪一个突出画面中最显眼主体的短片</textarea>
+        </div>
+
+        <div class="field row">
+          <div>
+            <label>帧数</label>
+            <input type="text" id="frames" value="30">
+          </div>
+          <div>
+            <label>FPS</label>
+            <input type="text" id="fps" value="15">
+          </div>
+        </div>
+
+        <button id="submit">开始生成</button>
+        <div class="meta" id="status-meta">就绪</div>
+
+        <div class="progress-track" id="track" style="display:none">
+          <div class="progress-bar" id="bar"></div>
+        </div>
+        <div class="stage-line" id="stage-line" style="display:none">
+          <span id="stage-name"></span>
+          <span id="stage-pct"></span>
+        </div>
+      </div>
+
+      <div class="panel" id="stages-panel" style="margin-top:20px; display:none">
+        <h2>各阶段耗时</h2>
+        <div class="stages" id="stages"></div>
+      </div>
+    </div>
+
+    <!-- 右侧：预览 -->
+    <div>
+      <div class="panel">
+        <h2>成片预览</h2>
+        <div class="video-area" id="video-area">
+          <div class="placeholder">
+            <span class="icon">▶</span>
+            提交任务后在此播放
+          </div>
+        </div>
+        <div id="dsl-box"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let pollTimer = null;
+
+const $ = id => document.getElementById(id);
+
+// ---------------------------------------------------------------- 初始化
+async function loadExamples() {
+  try {
+    const r = await fetch(`${API}/api/examples?limit=30`);
+    const d = await r.json();
+    const sel = $('example');
+    sel.innerHTML = '';
+    (d.examples || []).forEach(e => {
+      const o = document.createElement('option');
+      o.value = e.name;
+      o.textContent = e.name + (e.has_raw ? '  (真实 RGB)' : '  (合成)');
+      sel.appendChild(o);
+    });
+    $('status-meta').textContent = `可选素材 ${d.total_available} 个`;
+  } catch (e) {
+    $('status-meta').textContent = '无法连接后端，请确认服务已启动';
+  }
+}
+
+// ---------------------------------------------------------------- 进度
+function setProgress(stage, pct, detail) {
+  $('track').style.display = 'block';
+  $('stage-line').style.display = 'flex';
+  $('bar').style.width = `${(pct || 0) * 100}%`;
+  $('stage-name').textContent = stage || '';
+  $('stage-pct').textContent = `${Math.round((pct || 0) * 100)}%${detail ? ' · ' + detail : ''}`;
+}
+
+function resetProgress() {
+  $('track').style.display = 'none';
+  $('stage-line').style.display = 'none';
+  $('bar').style.width = '0%';
+  $('stages-panel').style.display = 'none';
+  $('stages').innerHTML = '';
+  $('dsl-box').innerHTML = '';
+}
+
+// ---------------------------------------------------------------- 提交
+async function submitJob() {
+  const btn = $('submit');
+  btn.disabled = true;
+  resetProgress();
+  $('status-meta').innerHTML = '<span class="badge run">提交中…</span>';
+
+  const body = {
+    instance_name: $('example').value,
+    instruction: $('instruction').value,
+    num_frames: parseInt($('frames').value) || 30,
+    fps: parseFloat($('fps').value) || 15,
+    width: 960, height: 540, shift_px: 14, use_llm: false,
+  };
+
+  try {
+    const r = await fetch(`${API}/api/jobs`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    const {job_id} = await r.json();
+    poll(job_id);
+  } catch (e) {
+    btn.disabled = false;
+    $('status-meta').innerHTML = `<span class="badge err">提交失败</span> ${e.message}`;
+  }
+}
+
+// ---------------------------------------------------------------- 轮询
+function poll(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`${API}/api/jobs/${jobId}`);
+      const d = await r.json();
+
+      if (d.status === 'running' || d.status === 'pending') {
+        setProgress(d.stage, d.progress, d.detail);
+        $('status-meta').innerHTML = '<span class="badge run">生成中</span>';
+        return;
+      }
+
+      clearInterval(pollTimer);
+      pollTimer = null;
+      $('submit').disabled = false;
+
+      if (d.status === 'failed') {
+        $('status-meta').innerHTML =
+          `<span class="badge err">失败</span> ${d.error || ''}`;
+        return;
+      }
+
+      // 完成
+      onComplete(jobId, d);
+    } catch (e) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      $('submit').disabled = false;
+      $('status-meta').innerHTML = `<span class="badge err">轮询失败</span> ${e.message}`;
+    }
+  }, 400);
+}
+
+function onComplete(jobId, d) {
+  const res = d.result || {};
+  $('status-meta').innerHTML =
+    `<span class="badge ok">完成</span> ` +
+    `${res.render_frames || 0} 帧 · ${(res.total_duration_s || 0).toFixed(1)}s`;
+
+  setProgress('完成', 1, '');
+  $('bar').style.width = '100%';
+
+  // 视频
+  const area = $('video-area');
+  area.innerHTML = '';
+  const v = document.createElement('video');
+  v.controls = true;
+  v.autoplay = true;
+  v.loop = true;
+  v.src = `${API}/api/jobs/${jobId}/result`;
+  area.appendChild(v);
+
+  // 阶段耗时
+  const stages = res.stages || [];
+  if (stages.length) {
+    $('stages-panel').style.display = 'block';
+    $('stages').innerHTML = stages.map(s => `
+      <div class="stage-row">
+        <span class="name">${s.stage}<span class="detail">${s.detail || ''}</span></span>
+        <span class="dur">${s.duration_s.toFixed(2)}s</span>
+      </div>`).join('');
+  }
+
+  // DSL 摘要
+  const dsl = res.dsl || {};
+  if (dsl.shots) {
+    const lines = dsl.shots.map((s, i) =>
+      `镜头${i}: [${s.t_start.toFixed(1)}s, ${s.t_end.toFixed(1)}s] ` +
+      `主体=${s.subject ?? '全景'} ${s.shot_type}/${s.camera_motion} fov=${s.fov_deg}°`
+    ).join('\n');
+    $('dsl-box').innerHTML =
+      `<div class="dsl-box"><strong style="color:#e4e8ef">剪辑方案</strong> ` +
+      `(${dsl.style || '-'})\n\n${lines}</div>`;
+  }
+}
+
+// ---------------------------------------------------------------- 绑定
+$('submit').addEventListener('click', submitJob);
+loadExamples();
+</script>
+</body>
+</html>
