@@ -325,16 +325,32 @@ def run_pipeline(
     # ============================================ 指标
     from ..eval import evaluate_trajectory
 
+    # 收集镜头边界 —— 成片由多个独立求解的镜头拼接而成，
+    # 镜头间的跳跃是剪辑的正常行为，必须从平滑度/角速度指标里排除。
+    # （不排除的话会得到"峰值 2195°/s、上限 45°/s"这类荒谬结果）
+    cut_frames: list[int] = []
+    cursor = 0
+    for shot in plan.dsl.shots:
+        f0 = max(int(round(shot.t_start * cfg.fps)), 0)
+        f1 = min(int(round(shot.t_end * cfg.fps)), cfg.num_frames)
+        if f1 <= f0:
+            continue
+        if cursor > 0:
+            cut_frames.append(cursor)
+        cursor += f1 - f0
+
     try:
         m = evaluate_trajectory(
             traj_all.yaw_deg, traj_all.pitch_deg, traj_all.fov_deg, traj_all.times,
             traj_all.yaw_deg, traj_all.pitch_deg,  # 自比对：仅用于报告轨迹自身性质
             yaw_continuous_deg=traj_all.yaw_continuous_deg,
+            cut_frames=cut_frames,
         )
         result.metrics = {
             "smoothness": round(m.smoothness, 3),
             "peak_angular_velocity_dps": round(m.peak_angular_velocity_dps, 2),
             "angular_velocity_compliance": round(m.angular_velocity_compliance, 4),
+            "num_cuts": len(cut_frames),
         }
     except Exception:  # noqa: BLE001 - 指标失败不应让整个任务失败
         result.metrics = {}

@@ -163,11 +163,16 @@ def trajectory_smoothness(
     yaw_continuous_deg: ArrayLike,
     pitch_deg: ArrayLike,
     times_s: ArrayLike,
+    *,
+    cut_frames: ArrayLike | None = None,
 ) -> float:
     """角加速度 RMS，单位为 度/秒²。
 
     **必须传入连续的 yaw**（unwrapped）—— 用归一化值算会在跨接缝处
     得到 358° 的虚假差分，让最平滑的轨迹看起来最糟。
+
+    **同时应传入 cut_frames** —— 见 `angular_velocity_compliance` 的
+    说明：镜头之间的跳变是剪辑的正常行为，不该计入平滑度惩罚。
 
     ------------------------------------------------------------------
     为什么用二阶差分（角加速度）而不是三阶（jerk）
@@ -200,8 +205,20 @@ def trajectory_smoothness(
     # 二阶差分除以对应的时间间隔乘积，得到角加速度
     accel_yaw = np.diff(y, n=2) / (dt[:-1] * dt[1:])
     accel_pitch = np.diff(p, n=2) / (dt[:-1] * dt[1:])
+    accel = np.sqrt(accel_yaw**2 + accel_pitch**2)
 
-    return float(np.sqrt(np.mean(accel_yaw**2 + accel_pitch**2)))
+    # 排除镜头边界附近的两阶差分
+    if cut_frames:
+        for f in np.asarray(cut_frames, dtype=np.int64):
+            lo = max(f - 2, 0)
+            hi = min(f + 1, len(accel))
+            accel[lo:hi] = np.nan
+        valid = ~np.isnan(accel)
+        if not valid.any():
+            return 0.0
+        return float(np.sqrt(np.mean(accel[valid] ** 2)))
+
+    return float(np.sqrt(np.mean(accel**2)))
 
 
 def angular_velocity_compliance(
@@ -210,11 +227,29 @@ def angular_velocity_compliance(
     times_s: ArrayLike,
     *,
     max_dps: float = 45.0,
+    cut_frames: ArrayLike | None = None,
 ) -> tuple[float, float]:
     """角速度符合率。
 
+    ------------------------------------------------------------------
+    ⚠ 必须传入 cut_frames（镜头边界），否则会把"切镜"误算成"剧烈运动"
+    ------------------------------------------------------------------
+
+    一段成片由多个**独立求解**的镜头拼接而成。镜头之间相机会跳跃 ——
+    这是剪辑的正常行为（"切"本来就是不连续的），不是缺陷。
+
+    若不加区分地对整条拼接轨迹算角速度，那些跳跃会被计入，产生
+    诸如"峰值 2195°/s 而配置上限只有 45°/s"的荒谬结果。
+
+    实测教训：先用整条轨迹算，得到峰值超限 49 倍；加入 cut_frames
+    排除边界后，各镜头内的指标才恢复正常。
+
+    Args:
+        cut_frames: 镜头边界的帧号列表。形如 [10, 20] 表示第 10、20 帧
+            处发生了切镜。跨过这些帧的差分会被排除。
+
     Returns:
-        (符合率, 峰值角速度)
+        (符合率, 峰值角速度) —— 均**不含**切镜处的跳变。
     """
     y = np.asarray(yaw_continuous_deg, dtype=np.float64)
     p = np.asarray(pitch_deg, dtype=np.float64)
@@ -226,6 +261,20 @@ def angular_velocity_compliance(
     dt = np.diff(t)
     dt = np.where(dt > 1e-9, dt, 1e-9)
     speed = np.sqrt(np.diff(y) ** 2 + np.diff(p) ** 2) / dt
+
+    # 排除跨越镜头边界的差分
+    if cut_frames:
+        jumps = np.asarray(cut_frames, dtype=np.int64)
+        # 差分 i 连接帧 i 与 i+1，故边界帧 f 对应差分索引 f-... 需同时排除两侧
+        for f in jumps:
+            lo = max(f - 1, 0)
+            hi = min(f, len(speed))
+            speed[lo:hi] = np.nan
+
+        valid = ~np.isnan(speed)
+        if not valid.any():
+            return 1.0, 0.0
+        return float(np.mean(speed[valid] <= max_dps)), float(np.nanmax(speed))
 
     return float(np.mean(speed <= max_dps)), float(speed.max())
 
@@ -241,12 +290,17 @@ def evaluate_trajectory(
     max_angular_vel_dps: float = 45.0,
     center_ratio: float = 1.0 / 3.0,
     yaw_continuous_deg: ArrayLike | None = None,
+    cut_frames: ArrayLike | None = None,
 ) -> TrajectoryMetrics:
     """一次性算出一条轨迹的全部指标。
 
     Args:
         yaw_continuous_deg: 连续 yaw。None 则内部 unwrap cam_yaw_deg。
             若调用方已有连续值（求解器会保留），传入可避免重复计算。
+        cut_frames: **镜头边界的帧号**。一段成片由多个独立求解的镜头
+            拼接而成，镜头间的跳跃是剪辑的正常行为。不传的话，
+            平滑度与角速度指标会把"切镜"算成"剧烈运动" ——
+            实测曾因此得到"峰值 2195°/s、上限 45°/s"的荒谬结果。
     """
     cam_yaw = np.asarray(cam_yaw_deg, dtype=np.float64)
     cam_pitch = np.asarray(cam_pitch_deg, dtype=np.float64)
@@ -270,7 +324,7 @@ def evaluate_trajectory(
     )
 
     compliance, peak = angular_velocity_compliance(
-        yaw_c, cam_pitch, times, max_dps=max_angular_vel_dps
+        yaw_c, cam_pitch, times, max_dps=max_angular_vel_dps, cut_frames=cut_frames
     )
 
     return TrajectoryMetrics(
@@ -280,7 +334,7 @@ def evaluate_trajectory(
         ),
         mean_offset_deg=float(np.mean(offset)) if offset.size else 0.0,
         max_offset_deg=float(np.max(offset)) if offset.size else 0.0,
-        smoothness=trajectory_smoothness(yaw_c, cam_pitch, times),
+        smoothness=trajectory_smoothness(yaw_c, cam_pitch, times, cut_frames=cut_frames),
         angular_velocity_compliance=compliance,
         peak_angular_velocity_dps=peak,
         visibility_rate=subject_visibility_rate(
