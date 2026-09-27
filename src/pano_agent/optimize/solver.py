@@ -86,6 +86,14 @@ class TrajectoryConfig:
     w_smooth: float = 0.5
     """平滑项的权重。越大越平稳，但跟随快速主体时会滞后。"""
 
+    w_velocity: float = 2.0
+    """角速度超限惩罚的权重。
+
+    **必须足够大，否则 `max_angular_vel_dps` 形同虚设。**
+    实测：早期版本定义了上限却没有实现对应惩罚项，轨迹峰值角速度
+    达到 253°/s（配置上限只有 45°/s）—— 声明了约束却没有执行，
+    是这类优化代码最容易犯的错。"""
+
     w_fov_smooth: float = 0.3
     w_fov_target: float = 0.2
     w_thirds: float = 0.0
@@ -253,7 +261,10 @@ class TrajectorySolver:
         result = minimize(
             self._objective,
             x0,
-            args=(subj_yaw, subj_pitch, times, target_fov_deg, rule_of_thirds, yaw_sign),
+            args=(
+                subj_yaw, subj_pitch, times,
+                target_fov_deg, rule_of_thirds, yaw_sign, motion,
+            ),
             method="L-BFGS-B",
             bounds=bounds,
             options={"maxiter": self.config.max_iter, "ftol": 1e-8},
@@ -316,8 +327,15 @@ class TrajectorySolver:
         target_fov: float,
         rule_of_thirds: bool,
         yaw_sign: float,
+        motion: MotionName,
     ) -> float:
-        """目标函数。"""
+        """目标函数。
+
+        ⚠ `motion` **必须参与目标函数**，而不只是决定初始猜测。
+        早期版本只把它用在初值上，结果无论声明什么运镜，优化器都
+        收敛到同一个解（主体居中）—— `static` 镜头会跟着主体跑，
+        实测峰值角速度高达 120°/s。运镜语义必须在目标里体现。
+        """
         n = len(subj_yaw)
         cam_yaw = x[:n]
         cam_pitch = x[n : 2 * n]
@@ -325,9 +343,22 @@ class TrajectorySolver:
 
         cfg = self.config
 
-        # ---- L_center：主体到光轴的大圆距离 ----
-        d = great_circle_distance(cam_yaw, cam_pitch, subj_yaw, subj_pitch)
-        l_center = float(np.mean(d**2))
+        # ---- L_center：主体相对光轴的偏移 ----
+        # 不同运镜对"主体该在画面哪里"的要求不同：
+        #   follow  主体居中（偏移 0）
+        #   lead    主体偏后（相机领先）
+        #   static  相机固定 —— 目标是一个**常数位置**，不随主体移动
+        if motion == "static":
+            anchor_yaw = float(np.mean(subj_yaw))
+            anchor_pitch = float(np.mean(subj_pitch)) * self._pitch_tracking_gain(motion)
+            l_center = float(np.mean((cam_yaw - anchor_yaw) ** 2)) + float(
+                np.mean((cam_pitch - anchor_pitch) ** 2)
+            )
+        else:
+            desired_offset = cfg.lead_offset_deg if motion == "lead" else 0.0
+            d = great_circle_distance(cam_yaw, cam_pitch, subj_yaw, subj_pitch)
+            # 对 lead：希望主体位于光轴**后方**，故实际距离应接近 desired_offset
+            l_center = float(np.mean((d - desired_offset) ** 2))
 
         # ---- L_smooth：二阶差分（角加速度）----
         if n >= 3:
@@ -336,6 +367,18 @@ class TrajectorySolver:
             l_smooth = float(np.mean(acc_yaw**2 + acc_pitch**2))
         else:
             l_smooth = 0.0
+
+        # ---- L_velocity：角速度上限（**软惩罚**）----
+        # 用软惩罚而非硬约束：L-BFGS-B 的 bounds 只支持逐变量区间，
+        # 表达不了"相邻帧差值"这类耦合约束。
+        l_velocity = 0.0
+        if n >= 2:
+            dt = np.maximum(np.diff(times), 1e-9)
+            speed = (
+                np.abs(np.diff(cam_yaw)) + np.abs(np.diff(cam_pitch))
+            ) / dt
+            excess = np.maximum(0.0, speed - cfg.max_angular_vel_dps)
+            l_velocity = float(np.mean(excess**2))
 
         # ---- L_fov ----
         if n >= 2:
@@ -357,6 +400,7 @@ class TrajectorySolver:
         return (
             cfg.w_center * l_center
             + cfg.w_smooth * l_smooth
+            + cfg.w_velocity * l_velocity
             + cfg.w_fov_smooth * l_fov_smooth
             + cfg.w_fov_target * l_fov_target
             + cfg.w_thirds * l_thirds
