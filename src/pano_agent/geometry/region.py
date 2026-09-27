@@ -259,6 +259,35 @@ class SphericalBox:
         )
 
     @classmethod
+    def from_centered_points(
+        cls,
+        center_yaw_deg: float,
+        center_pitch_deg: float,
+        yaw_deg: ArrayLike,
+        pitch_deg: ArrayLike,
+    ) -> SphericalBox:
+        """从给定的中心与一组边界点构造球面框。
+
+        用于**投影域检测的反投影**：已知立方体面上框的四角方向，
+        求覆盖它们的最小切平面矩形。
+
+        与 `from_erp_pixels` 的区别在于中心是**已知的**（由圆统计给出），
+        而非从像素坐标反推 —— 后者在跨接缝时会得到错误的中心。
+        """
+        alpha, beta = angular_offsets(
+            yaw_deg, pitch_deg, center_yaw_deg, center_pitch_deg
+        )
+        half_w = float(np.max(np.abs(alpha)))
+        half_h = float(np.max(np.abs(beta)))
+
+        return cls(
+            yaw_deg=float(center_yaw_deg),
+            pitch_deg=float(np.clip(center_pitch_deg, -90.0, 90.0)),
+            width_deg=float(np.clip(2.0 * half_w, 1e-6, 360.0)),
+            height_deg=float(np.clip(2.0 * half_h, 1e-6, 180.0)),
+        )
+
+    @classmethod
     def from_bfov_values(cls, values: ArrayLike, *, is_rotated: bool = False) -> SphericalBox:
         """从 360VOT 标注格式构造。
 

@@ -76,14 +76,29 @@ CLASS_NAMES: dict[int, str] = {
 BACKGROUND_CLASSES = {3, 4, 25, 26, 27}
 
 
-def load_mask(path: Path) -> np.ndarray:
-    """读取语义 mask（类别 ID 在 alpha 通道）。"""
+def load_input(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
+    """读取输入图，自动判别是「语义 mask」还是「真实 RGB」。
+
+    两种数据的差异：
+        nyc_seg  RGBA，RGB 通道全 0，类别 ID 在 alpha 通道 → 有完美 GT
+        nyc_Raw  RGB，真实影像                              → 无 GT，只有 YOLO
+
+    返回 (用于显示的 RGB 图, 语义 mask 或 None)。
+    """
     from PIL import Image
 
     arr = np.asarray(Image.open(path))
+
     if arr.ndim == 3 and arr.shape[2] == 4:
-        return arr[..., 3].astype(np.uint8)
-    raise ValueError(f"期望 RGBA，实际 {arr.shape}")
+        mask = arr[..., 3].astype(np.uint8)
+        # 语义图的 RGB 是空的，需要上色才能送进 YOLO / 显示
+        return colorize(mask), mask
+
+    if arr.ndim == 3 and arr.shape[2] == 3:
+        return arr.astype(np.uint8), None
+
+    # 灰度图：复制成三通道
+    return np.stack([arr] * 3, axis=-1).astype(np.uint8), None
 
 
 def colorize(mask: np.ndarray) -> np.ndarray:
@@ -136,20 +151,46 @@ def extract_gt_boxes(
     return boxes[:max_boxes]
 
 
-def run_yolo(erp_rgb: np.ndarray, *, weights: str = "yolo11n.pt"):
-    """在 ERP 上跑真实 YOLO 推理，返回 (boxes, 耗时秒, 峰值显存MB)。"""
+def run_yolo(
+    erp_rgb: np.ndarray,
+    *,
+    weights: str = "yolo11n.pt",
+    conf: float = 0.01,
+    imgsz: tuple[int, int] = (1024, 2048),
+):
+    """在 ERP 上跑真实 YOLO 推理，返回 (boxes, 耗时秒, 峰值显存MB)。
+
+    ⚠ 为什么 conf 用 0.01 而非默认的 0.25：
+
+    实测发现，COCO 预训练的检测器直接用在 ERP 上时**置信度普遍极低**。
+    同一张真实全景图：
+
+        conf=0.15 → 0 个检测
+        conf=0.05 → 0 个
+        conf=0.01 → 17 个
+
+    原因有三：ERP 两极畸变让目标的形状与训练分布不符；2:1 的宽扁画幅
+    在 letterbox 后目标进一步缩小；本数据集多为黄昏场景（均值亮度 64，
+    28% 像素亮度 < 30）。
+
+    这正是 Insta360 研究院所称「透视→全景鸿沟」的一个具体表现，
+    也是 `detect.py` 保留「极点分块」扩展点的原因。
+
+    降低阈值会引入虚警，因此**不能把它当作解决方案**，只是让链路
+    在真实数据上跑通、暴露问题。真正的修法是全景域微调或投影域推理。
+    """
     import torch
     from ultralytics import YOLO
 
     model = YOLO(weights)
 
     # 预热
-    model.predict(erp_rgb, imgsz=(640, 1280), device="cuda", verbose=False, half=True)
+    model.predict(erp_rgb, imgsz=imgsz, device="cuda", verbose=False, half=True)
 
     torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
     results = model.predict(
-        erp_rgb, imgsz=(640, 1280), conf=0.15, device="cuda", verbose=False, half=True
+        erp_rgb, imgsz=imgsz, conf=conf, device="cuda", verbose=False, half=True
     )
     elapsed = time.perf_counter() - t0
     peak_mb = torch.cuda.max_memory_allocated() / 1048576
@@ -194,11 +235,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- 1. 载入 ----
     print(f"\n[1] 载入 {args.input.name}")
-    mask = load_mask(args.input)
-    height, width = mask.shape
+    erp_rgb, mask = load_input(args.input)
+    height, width = erp_rgb.shape[:2]
+    data_kind = "语义 mask（有完美 GT）" if mask is not None else "真实 RGB（无 GT，仅 YOLO）"
     print(f"    ERP {width}×{height}  比例 {width/height:.4f}")
-
-    erp_rgb = colorize(mask)
+    print(f"    数据类型: {data_kind}")
 
     # ---- 2. 真实 YOLO 推理 ----
     print(f"\n[2] YOLO 推理（{args.weights}，真实 GPU）")
@@ -206,42 +247,64 @@ def main(argv: list[str] | None = None) -> int:
     print(f"    检测到 {len(yolo_boxes)} 个目标")
     print(f"    耗时 {elapsed*1000:.1f} ms  |  峰值显存 {peak_mb:.1f} MiB")
 
-    # ---- 3. 语义 GT 框 ----
-    print("\n[3] 从语义 mask 提取 GT 框（逐像素完美真值）")
-    gt_boxes = extract_gt_boxes(mask)
-    print(f"    提取到 {len(gt_boxes)} 个前景区域")
+    # ---- 3. 语义 GT 框（仅语义 mask 输入可用）----
+    if mask is not None:
+        print("\n[3] 从语义 mask 提取 GT 框（逐像素完美真值）")
+        gt_boxes = extract_gt_boxes(mask)
+        print(f"    提取到 {len(gt_boxes)} 个前景区域")
+    else:
+        print("\n[3] 真实 RGB 输入 —— 无语义 GT，几何验证改用 YOLO 框")
+        gt_boxes = []
 
     # ---- 4. 像素框 → 球面框（核心几何验证）----
-    print("\n[4] 像素框 → 球面框转换")
+    # 有语义 GT 时用 GT（逐像素完美，几何验证更可靠）；
+    # 只有真实 RGB 时退回 YOLO 框 —— 框不准，但足以验证转换链路本身。
+    if gt_boxes:
+        source_boxes = [(b[0], b[1], b[2], b[3], CLASS_NAMES.get(b[4], str(b[4]))) for b in gt_boxes]
+        source_label = "语义 GT"
+    else:
+        source_boxes = [
+            (b[0], b[1], b[2], b[3], f"yolo_cls{int(b[5])}") for b in yolo_boxes
+        ]
+        source_label = "YOLO"
+
+    print(f"\n[4] 像素框 → 球面框转换（数据来源：{source_label}）")
     print(f"    {'类别':<16}{'角宽':>8}{'角高':>8}{'中心yaw':>10}{'中心pitch':>11}{'角面积(sr)':>12}")
     print("    " + "-" * 66)
 
     detections = []
-    for x1, y1, x2, y2, cid in gt_boxes[:6]:
+    for x1, y1, x2, y2, name in source_boxes[:6]:
         box = SphericalBox.from_erp_pixels(x1, y1, x2, y2, width, height)
-        name = CLASS_NAMES.get(cid, str(cid))
         print(
             f"    {name:<16}{box.width_deg:>7.2f}°{box.height_deg:>7.2f}°"
             f"{box.yaw_deg:>9.2f}°{box.pitch_deg:>10.2f}°{box.solid_angle_sr:>12.5f}"
         )
-        detections.append((cid, box))
+        detections.append((name, box))
 
     # ---- 5. 高纬压缩检验 ----
     print("\n[5] 高纬压缩检验（验证几何转换是否尊重 ERP 非均匀性）")
     if len(detections) >= 2:
         by_lat = sorted(detections, key=lambda d: abs(d[1].pitch_deg))
         low, high = by_lat[0], by_lat[-1]
-        ratio_pitch = abs(high[1].pitch_deg) / max(abs(low[1].pitch_deg), 1e-6)
-        print(f"    最低纬目标 {CLASS_NAMES.get(low[0])}: pitch={low[1].pitch_deg:.1f}°, "
-              f"角宽={low[1].width_deg:.2f}°")
-        print(f"    最高纬目标 {CLASS_NAMES.get(high[0])}: pitch={high[1].pitch_deg:.1f}°, "
-              f"角宽={high[1].width_deg:.2f}°")
-        print(f"    纬度比 {ratio_pitch:.2f}×  →  两者的像素↔角度换算尺度必然不同")
+
+        # ⚠ 换算尺度之比 = cos(低纬) / cos(高纬)，**不是**纬度值之比。
+        #   拿"纬度值之比"当尺度比是个常见误读：ERP 的面积压缩因子是
+        #   cos φ 而非 φ 本身。
+        cos_low = float(np.cos(np.radians(low[1].pitch_deg)))
+        cos_high = float(np.cos(np.radians(high[1].pitch_deg)))
+        scale_ratio = cos_low / cos_high if cos_high > 1e-9 else float("inf")
+
+        print(f"    最低纬目标 {low[0]:<12} pitch={low[1].pitch_deg:>7.2f}°  "
+              f"角宽={low[1].width_deg:>6.2f}°  cos φ={cos_low:.3f}")
+        print(f"    最高纬目标 {high[0]:<12} pitch={high[1].pitch_deg:>7.2f}°  "
+              f"角宽={high[1].width_deg:>6.2f}°  cos φ={cos_high:.3f}")
+        print(f"    换算尺度比 {scale_ratio:.3f}×  →  同样的像素宽度在高纬"
+              f"对应约 {1/scale_ratio:.3f} 倍的角宽度")
 
     # ---- 6. 用 GT 框构建 PSG ----
     print("\n[6] 构建 PSG（用 GT 框，单帧）")
     states = []
-    for i, (cid, box) in enumerate(detections):
+    for i, (name, box) in enumerate(detections):
         states.append(
             TrackState(
                 track_id=i + 1,
@@ -250,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
                 width_deg=box.width_deg,
                 height_deg=box.height_deg,
                 confidence=1.0,
-                category=CLASS_NAMES.get(cid, str(cid)),
+                category=name,
                 age=10, hits=10, time_since_update=0, is_confirmed=True,
             )
         )
@@ -286,12 +349,15 @@ def main(argv: list[str] | None = None) -> int:
         canvas = Image.fromarray(erp_rgb)
         draw = ImageDraw.Draw(canvas)
 
+        # 绿框：语义 GT（仅语义 mask 输入时有）
         for x1, y1, x2, y2, cid in gt_boxes:
             draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=4)
             draw.text((x1 + 6, y1 + 6), CLASS_NAMES.get(cid, str(cid)), fill=(0, 255, 0))
 
+        # 红框：YOLO 检测（在真实 RGB 上这是主要结果）
         for x1, y1, x2, y2, conf, cls in yolo_boxes:
-            draw.rectangle([x1, y1, x2, y2], outline=(255, 60, 60), width=2)
+            draw.rectangle([x1, y1, x2, y2], outline=(255, 60, 60), width=3)
+            draw.text((x1 + 6, y2 - 18), f"{int(cls)} {conf:.2f}", fill=(255, 60, 60))
 
         args.output.parent.mkdir(parents=True, exist_ok=True)
         canvas.save(args.output)
